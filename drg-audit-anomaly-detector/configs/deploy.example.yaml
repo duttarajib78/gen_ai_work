@@ -1,0 +1,69 @@
+# Copy to configs/deploy.<stage>.yaml, replace every REPLACE_ME, then:
+#   python sagemaker/deploy_endpoint.py deploy --config configs/deploy.<stage>.yaml
+# The deploy script refuses to run while any REPLACE_ME remains.
+region: REPLACE_ME                       # e.g. ap-southeast-2
+stage: dev                               # dev | staging | prod  (prod enforces extra policy)
+endpoint_name: drg-audit-anomaly-dev     # <= 36 chars: letters, digits, single hyphens
+execution_role_arn: REPLACE_ME           # least-privilege role: see iam/endpoint_execution_role_policy.json
+
+model:
+  package_path: dist/model.tar.gz        # output of sagemaker/build_model_package.py
+  s3_bucket: REPLACE_ME                  # private bucket, default encryption + versioning, block public access
+  s3_prefix: drg-audit/models
+  kms_key_arn: REPLACE_ME                # customer-managed key: package, endpoint volume and data capture
+  expected_bucket_owner: REPLACE_ME      # 12-digit account id that owns the bucket (confused-deputy guard)
+
+container:
+  image_uri: null                        # explicit Deep Learning Container URI, or leave null with the SDK installed
+  framework_version: "2.6.0"             # must match the Python version the package was built for
+  py_version: py312
+
+endpoint:
+  instance_type: ml.m5.xlarge            # CPU is sufficient for this model; use ml.g4dn.xlarge for GPU
+  initial_instance_count: 2              # >= 2 for availability
+  variant_name: AllTraffic
+  container_startup_timeout_seconds: 600
+  model_data_download_timeout_seconds: 600
+
+security:
+  enable_network_isolation: true         # needs the default wheelhouse package; no outbound calls from the container
+  allow_no_vpc: false                    # true only with explicit security approval
+  vpc:
+    subnet_ids: [REPLACE_ME, REPLACE_ME]       # >= 2 subnets in different Availability Zones
+    security_group_ids: [REPLACE_ME]           # no inbound rules needed except from your clients' VPC endpoint
+
+container_environment:                   # passed to the model container
+  SAGEMAKER_MODEL_SERVER_WORKERS: "2"    # one model copy per worker
+  SAGEMAKER_MODEL_SERVER_TIMEOUT: "60"
+  DRG_AUDIT_TORCH_THREADS: "2"           # ~ vCPUs / workers
+  DRG_AUDIT_LOG_LEVEL: INFO
+
+autoscaling:
+  enabled: true
+  min_capacity: 2
+  max_capacity: 6
+  target_invocations_per_instance_per_minute: 1000   # set from a load test: sustained requests/min x 0.5-0.7
+  scale_in_cooldown_seconds: 300
+  scale_out_cooldown_seconds: 60
+
+alarms:
+  sns_topic_arn: null                    # required for stage: prod
+  error_5xx_threshold: 5                 # errors per minute
+  model_latency_p95_ms: 500
+  memory_utilization_percent: 85
+
+data_capture:                            # payloads contain clinical data: leave off unless approved
+  enabled: false
+  s3_destination: null                   # s3://bucket/prefix (encrypted with model.kms_key_arn)
+  sampling_percentage: 10
+
+blue_green:                              # applied when updating an existing endpoint
+  canary_size_percent: 25
+  wait_seconds: 300
+  termination_wait_seconds: 120
+  max_execution_timeout_seconds: 1800
+
+tags:
+  Project: drg-audit
+  Owner: REPLACE_ME
+  DataClassification: confidential

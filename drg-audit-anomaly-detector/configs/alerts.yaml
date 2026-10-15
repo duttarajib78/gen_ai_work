@@ -1,0 +1,26 @@
+# Alert generation (replaces the prototype's main.py). Point the io paths at your curated datasets.
+rule:
+  alert_instance_id: 62206
+  concept_name: medical_investigation_mismatch_with_drg_benefit
+  target_service_class_codes: [DRG_CASE_PAYMENT, EPM, CWO]
+  alert_info_prefix: ""
+
+eligibility:
+  fund_ids: [102, 103]
+  min_diagnosis_count: 2
+  exclude_principal_dx_prefixes: [C]
+  exclude_first_secondary_dx_prefixes: [R, Z]
+  exclude_previously_alerted: true
+
+grouper:
+  backend: au_grouper               # internal package, install a pinned version from your private index
+  lorica_stack_name: hambs-shed
+  reference_data_dir: REPLACE_ME/reference_data
+
+io:
+  admissions_path: REPLACE_ME/admission_summary.feather
+  past_alerts_path: REPLACE_ME/alert_summary.feather
+  predictions_path: REPLACE_ME/audit_predictions.csv     # output of `drg-audit score`
+  output_dir: REPLACE_ME/alerts
+  output_filename: "{concept_name}_{run_id}_json.txt"    # use "{concept_name}_json.txt" to keep the legacy name
+  write_excel: false                # the Excel copy duplicates clinical data; enable only if needed

@@ -1,0 +1,5 @@
+# Packages the endpoint needs on top of the AWS PyTorch inference container, which already
+# provides torch, numpy and the sagemaker-inference toolkit. Pin exactly, and train with the
+# same transformers / safetensors versions that serve (see README "Reproducibility").
+transformers==4.46.3
+safetensors==0.4.5

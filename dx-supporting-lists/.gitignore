@@ -1,0 +1,21 @@
+# Licensed reference data and everything the system produces: never committed.
+data/*
+!data/README.txt
+data-sample/
+output/
+compiled/
+# Secrets: this project has none by design (IAM roles only), but keep it that way.
+*.env
+.env*
+!deploy/env.example
+*.pem
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/

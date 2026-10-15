@@ -1,0 +1,52 @@
+{
+  "catalog_version": "2026-10-15",
+  "pricing_note": "USD per million tokens, point-in-time (October 2026), carried over from the earlier Agent SDK build. NOT fetched live. Verify at https://aws.amazon.com/bedrock/pricing/ before budgeting; override any entry with DX_MODEL_CATALOG.",
+  "geo_price_multiplier": 1.10,
+  "cache_read_multiplier": 0.10,
+  "cache_write_multiplier": 1.25,
+  "default_alias": "claude-sonnet-5",
+  "models": {
+    "claude-sonnet-5": {
+      "base_id": "anthropic.claude-sonnet-5",
+      "price_in": 2.00, "price_out": 10.00,
+      "thinking_style": "adaptive_effort", "off_mode": "disabled",
+      "profile_prefixes": ["global", "us", "eu", "au"],
+      "notes": "The model validated in the earlier project and the default here. Adaptive thinking is on by default; effort is configurable. Budget-token thinking and sampling parameters are rejected."
+    },
+    "claude-sonnet-5-5": {
+      "base_id": "anthropic.claude-sonnet-5-5",
+      "price_in": 2.00, "price_out": 10.00,
+      "thinking_style": "adaptive_effort", "off_mode": "between_tools",
+      "profile_prefixes": ["global", "us", "eu"],
+      "notes": "Base model id cannot be invoked on demand: use an inference profile. thinking.type=disabled and forced tool_choice are rejected, so 'disabled' maps to thinking.type=between_tools. NOT validated for this task."
+    },
+    "claude-haiku-5-5": {
+      "base_id": "anthropic.claude-haiku-5-5",
+      "price_in": 0.10, "price_out": 0.50,
+      "thinking_style": "adaptive_effort", "off_mode": "disabled",
+      "profile_prefixes": [],
+      "notes": "Manual budget thinking is not available. Profile availability not verified for this catalog: confirm with `aws bedrock list-inference-profiles`. NOT validated for this task."
+    },
+    "claude-opus-5-5": {
+      "base_id": "anthropic.claude-opus-5-5",
+      "price_in": 4.00, "price_out": 20.00,
+      "thinking_style": "adaptive_effort", "off_mode": "between_tools",
+      "profile_prefixes": [],
+      "notes": "Profile availability not verified for this catalog. NOT validated for this task."
+    },
+    "claude-fable-5-1": {
+      "base_id": "anthropic.claude-fable-5-1",
+      "price_in": 10.00, "price_out": 50.00,
+      "thinking_style": "adaptive_effort", "off_mode": "unsupported",
+      "profile_prefixes": [],
+      "notes": "Adaptive thinking only (disabled and budget thinking are rejected). Profile availability not verified for this catalog. NOT validated for this task."
+    },
+    "claude-haiku-4-5-20251001": {
+      "base_id": "anthropic.claude-haiku-4-5-20251001-v1:0",
+      "price_in": 1.00, "price_out": 5.00,
+      "thinking_style": "budget", "off_mode": "disabled",
+      "profile_prefixes": ["global", "us", "eu", "au", "jp", "apac"],
+      "notes": "Manual budget thinking (minimum 1024 tokens)."
+    }
+  }
+}

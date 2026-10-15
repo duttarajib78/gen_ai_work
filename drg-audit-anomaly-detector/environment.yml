@@ -1,0 +1,12 @@
+# Development environment for SageMaker Code Editor (or any Linux / macOS machine).
+#   conda env create -f environment.yml && conda activate drg-audit
+# Python 3.12 matches the PyTorch 2.6 SageMaker containers used by the endpoint and training jobs.
+name: drg-audit
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - -r requirements/dev.in
+      - -e .

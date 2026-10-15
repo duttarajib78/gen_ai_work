@@ -1,0 +1,18 @@
+# AWS CodeBuild spec for environments without a Docker daemon (SageMaker Code Editor without Docker access).
+# Create a CodeBuild project (privileged mode) with env vars ECR_REPOSITORY and optionally IMAGE_TAG; source = this repo.
+version: 0.2
+phases:
+  pre_build:
+    commands:
+      - export AWS_ACCOUNT_ID="$(echo "$CODEBUILD_BUILD_ARN" | cut -d: -f5)"
+      - export REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - export IMAGE_TAG="${IMAGE_TAG:-$(echo "${CODEBUILD_RESOLVED_SOURCE_VERSION:-manual}" | cut -c1-12)}"
+      - test -f requirements/prod.lock
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+  build:
+    commands:
+      - docker build --build-arg VERSION="$IMAGE_TAG" --build-arg GIT_SHA="$IMAGE_TAG" -t "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+  post_build:
+    commands:
+      - docker push "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+      - echo "IMAGE_URI=$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"

@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# IHACPA/AIHW-licensed documents and everything derived from them stay out of version control:
+source_docs/*.pdf
+source_docs/*.PDF
+source_docs/*.xml
+source_docs/*.XML
+corpus/
+build/
+dist/
+checkpoints/
+sample_output/
+logs/
+.env
+.env.*
+!.env.example

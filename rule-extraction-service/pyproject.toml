@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rule-extraction-service"
+version = "1.0.0"
+description = "Upcoding / coding-compliance rule extraction with the Claude Agent SDK on Amazon Bedrock, served from a SageMaker real-time endpoint."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  # Bump deliberately and re-run `rule-extractor contract-check`. 0.2.158+ is required for verbatim_prompts.
+  "claude-agent-sdk==0.2.159",
+  "boto3>=1.40,<2",
+  "Flask==3.1.3",
+  "gunicorn>=23.0,<24",
+  "PyYAML==6.0.3",
+  "openpyxl==3.1.5",
+  "pypdf==5.9.0",
+  "pdfplumber==0.11.9",
+  "lxml==6.0.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "pip-tools>=7.4", "reportlab>=4.2", "cfn-lint>=1.0"]
+# Only needed when you plug in your real AR-DRG grouper (see README "Grouper plug-in"):
+grouper = ["pandas>=2.2", "pyarrow"]
+
+[project.scripts]
+rule-extractor = "rule_extractor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rule_extractor = ["agents/prompt_templates/*.md", "py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+
+[tool.ruff]
+line-length = 140
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["E501", "S101", "S311", "S603", "S607"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]
+"scripts/*" = ["S"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true

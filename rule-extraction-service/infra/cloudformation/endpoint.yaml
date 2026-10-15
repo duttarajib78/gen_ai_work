@@ -1,0 +1,252 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  SageMaker real-time endpoint (BYOC) for the rule-extraction service: model, endpoint config, blue/green endpoint with
+  alarm-based auto-rollback, alarms, log retention, and optional target-tracking auto scaling.
+
+Parameters:
+  EndpointName:
+    Type: String
+    Default: rule-extractor-dev
+    AllowedPattern: "^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62})$"
+  ModelVersion:
+    Type: String
+    Default: v1
+    Description: Change on every new image/model artifact so SageMaker creates fresh Model/EndpointConfig resources (immutable, rollback-friendly).
+    AllowedPattern: "^[a-zA-Z0-9-]{1,24}$"
+  ImageUri:
+    Type: String
+    Description: ECR image URI with an immutable tag (the foundation stack's repository + the tag you pushed).
+  ModelDataUrl:
+    Type: String
+    Description: s3:// URI of dist/model.tar.gz (printed by scripts/deploy.py upload-model).
+    AllowedPattern: "^s3://.+\\.tar\\.gz$"
+  ExecutionRoleArn:
+    Type: String
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets (>=2 AZs recommended) with routes to the required VPC endpoints.
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: Egress 443 only (to the VPC endpoints). No inbound rules are needed.
+  InstanceType:
+    Type: String
+    Default: ml.m5.xlarge
+  InstanceCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+  StateTableName:
+    Type: String
+  QueueUrl:
+    Type: String
+  DlqName:
+    Type: String
+  ArtifactBucket:
+    Type: String
+  KmsKeyArn:
+    Type: String
+  MetricsNamespace:
+    Type: String
+    Default: RuleExtractor
+  InferenceProfilePrefix:
+    Type: String
+    Default: au
+    AllowedValues: [au, apac, us, eu, jp, global]
+  ModelStrong:
+    Type: String
+    Default: anthropic.claude-sonnet-5
+  ModelFast:
+    Type: String
+    Default: anthropic.claude-haiku-4-5-20251001-v1:0
+  Concurrency:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    MaxValue: 16
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+  VolumeSizeInGB:
+    Type: Number
+    Default: 50
+  EnableAutoScaling:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  MaxInstanceCount:
+    Type: Number
+    Default: 4
+  DisableScaleIn:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Scale-in terminates instances that may be mid-unit (units are handed back and retried, at some wasted spend).
+  AlarmTopicArn:
+    Type: String
+    Default: ""
+
+Conditions:
+  UseAutoScaling: !Equals [!Ref EnableAutoScaling, "true"]
+  HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, ""]]
+  ScaleInDisabled: !Equals [!Ref DisableScaleIn, "true"]
+
+Resources:
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/sagemaker/Endpoints/${EndpointName}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  Model:
+    Type: AWS::SageMaker::Model
+    Properties:
+      ModelName: !Sub "${EndpointName}-${ModelVersion}"
+      ExecutionRoleArn: !Ref ExecutionRoleArn
+      EnableNetworkIsolation: false
+      VpcConfig:
+        Subnets: !Ref SubnetIds
+        SecurityGroupIds: !Ref SecurityGroupIds
+      PrimaryContainer:
+        Image: !Ref ImageUri
+        ModelDataUrl: !Ref ModelDataUrl
+        Environment:
+          AWS_REGION: !Ref "AWS::Region"
+          RULE_EXTRACTOR_ENV: prod
+          RULE_EXTRACTOR_BACKEND: aws
+          RULE_EXTRACTOR_ENDPOINT_NAME: !Ref EndpointName
+          RULE_EXTRACTOR_STATE_TABLE: !Ref StateTableName
+          RULE_EXTRACTOR_QUEUE_URL: !Ref QueueUrl
+          RULE_EXTRACTOR_ARTIFACT_BUCKET: !Ref ArtifactBucket
+          RULE_EXTRACTOR_KMS_KEY_ID: !Ref KmsKeyArn
+          RULE_EXTRACTOR_METRICS_NAMESPACE: !Ref MetricsNamespace
+          RULE_EXTRACTOR_BEDROCK_PROFILE_PREFIX: !Ref InferenceProfilePrefix
+          RULE_EXTRACTOR_MODEL_STRONG: !Ref ModelStrong
+          RULE_EXTRACTOR_MODEL_FAST: !Ref ModelFast
+          RULE_EXTRACTOR_CONCURRENCY: !Ref Concurrency
+          RULE_EXTRACTOR_MODEL_DIR: /opt/ml/model
+
+  EndpointConfig:
+    Type: AWS::SageMaker::EndpointConfig
+    Properties:
+      EndpointConfigName: !Sub "${EndpointName}-${ModelVersion}"
+      KmsKeyId: !Ref KmsKeyArn
+      ProductionVariants:
+        - VariantName: AllTraffic
+          ModelName: !GetAtt Model.ModelName
+          InstanceType: !Ref InstanceType
+          InitialInstanceCount: !Ref InstanceCount
+          InitialVariantWeight: 1.0
+          VolumeSizeInGB: !Ref VolumeSizeInGB
+          ModelDataDownloadTimeoutInSeconds: 1200
+          ContainerStartupHealthCheckTimeoutInSeconds: 900
+
+  Endpoint:
+    Type: AWS::SageMaker::Endpoint
+    DependsOn: LogGroup
+    Properties:
+      EndpointName: !Ref EndpointName
+      EndpointConfigName: !GetAtt EndpointConfig.EndpointConfigName
+      DeploymentConfig:
+        BlueGreenUpdatePolicy:
+          TrafficRoutingConfiguration:
+            Type: ALL_AT_ONCE
+            WaitIntervalInSeconds: 300
+          TerminationWaitInSeconds: 300
+          MaximumExecutionTimeoutInSeconds: 3600
+        AutoRollbackConfiguration:
+          Alarms:
+            - AlarmName: !Ref Invocation5xxAlarm
+
+  Invocation5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EndpointName}-invocation-5xx"
+      AlarmDescription: Container returned 5xx to SageMaker (also gates blue/green rollout).
+      Namespace: AWS/SageMaker
+      MetricName: Invocation5XXErrors
+      Dimensions:
+        - Name: EndpointName
+          Value: !Ref EndpointName
+        - Name: VariantName
+          Value: AllTraffic
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref "AWS::NoValue"]
+
+  DeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EndpointName}-dlq-not-empty"
+      AlarmDescription: Work items exhausted their redeliveries; inspect the DLQ (poison message or crash loop).
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Ref DlqName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref "AWS::NoValue"]
+
+  UnitsFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EndpointName}-units-failed"
+      AlarmDescription: Many extraction units failed within an hour (Bedrock access, throttling, or a bad deployment).
+      Namespace: !Ref MetricsNamespace
+      MetricName: UnitsFailed
+      Dimensions:
+        - Name: EndpointName
+          Value: !Ref EndpointName
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref "AWS::NoValue"]
+
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: UseAutoScaling
+    Properties:
+      ServiceNamespace: sagemaker
+      ScalableDimension: sagemaker:variant:DesiredInstanceCount
+      ResourceId: !Sub "endpoint/${Endpoint.EndpointName}/variant/AllTraffic"
+      MinCapacity: !Ref InstanceCount
+      MaxCapacity: !Ref MaxInstanceCount
+
+  ScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: UseAutoScaling
+    Properties:
+      PolicyName: !Sub "${EndpointName}-worker-utilization"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 75
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 1800
+        DisableScaleIn: !If [ScaleInDisabled, true, false]
+        CustomizedMetricSpecification:
+          Namespace: !Ref MetricsNamespace
+          MetricName: WorkerSlotUtilization
+          Statistic: Average
+          Unit: Percent
+          Dimensions:
+            - Name: EndpointName
+              Value: !Ref EndpointName
+
+Outputs:
+  EndpointName:
+    Value: !GetAtt Endpoint.EndpointName
+  ModelName:
+    Value: !GetAtt Model.ModelName

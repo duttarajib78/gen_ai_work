@@ -1,0 +1,95 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageEndpointResources",
+      "Effect": "Allow",
+      "Action": [
+        "sagemaker:CreateModel", "sagemaker:CreateEndpointConfig", "sagemaker:CreateEndpoint",
+        "sagemaker:UpdateEndpoint", "sagemaker:DescribeModel", "sagemaker:DescribeEndpointConfig",
+        "sagemaker:DescribeEndpoint", "sagemaker:DeleteModel", "sagemaker:DeleteEndpointConfig",
+        "sagemaker:DeleteEndpoint", "sagemaker:AddTags", "sagemaker:ListTags"
+      ],
+      "Resource": [
+        "arn:aws:sagemaker:<REGION>:<ACCOUNT_ID>:model/<ENDPOINT_NAME_PREFIX>*",
+        "arn:aws:sagemaker:<REGION>:<ACCOUNT_ID>:endpoint-config/<ENDPOINT_NAME_PREFIX>*",
+        "arn:aws:sagemaker:<REGION>:<ACCOUNT_ID>:endpoint/<ENDPOINT_NAME_PREFIX>*"
+      ]
+    },
+    {
+      "Sid": "InvokeForSmokeTest",
+      "Effect": "Allow",
+      "Action": "sagemaker:InvokeEndpoint",
+      "Resource": "arn:aws:sagemaker:<REGION>:<ACCOUNT_ID>:endpoint/<ENDPOINT_NAME_PREFIX>*"
+    },
+    {
+      "Sid": "PassOnlyTheEndpointRoleToSageMaker",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/<ENDPOINT_ROLE_NAME>",
+      "Condition": { "StringEquals": { "iam:PassedToService": "sagemaker.amazonaws.com" } }
+    },
+    {
+      "Sid": "PublishModelPackage",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject"],
+      "Resource": "arn:aws:s3:::<BUCKET>/<PREFIX>/*"
+    },
+    {
+      "Sid": "ListBucketSoMissingKeysReturn404NotAccessDenied",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::<BUCKET>",
+      "Condition": { "StringLike": { "s3:prefix": ["<PREFIX>/*"] } }
+    },
+    {
+      "Sid": "UseModelKey",
+      "Effect": "Allow",
+      "Action": ["kms:GenerateDataKey", "kms:Encrypt", "kms:Decrypt", "kms:DescribeKey"],
+      "Resource": "arn:aws:kms:<REGION>:<ACCOUNT_ID>:key/<KMS_KEY_ID>"
+    },
+    {
+      "Sid": "ConfigureAutoscaling",
+      "Effect": "Allow",
+      "Action": [
+        "application-autoscaling:RegisterScalableTarget", "application-autoscaling:DeregisterScalableTarget",
+        "application-autoscaling:PutScalingPolicy", "application-autoscaling:DeleteScalingPolicy",
+        "application-autoscaling:DescribeScalableTargets", "application-autoscaling:DescribeScalingPolicies"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CreateAutoscalingServiceLinkedRoleOnce",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/aws-service-role/sagemaker.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_SageMakerEndpoint",
+      "Condition": { "StringLike": { "iam:AWSServiceName": "sagemaker.application-autoscaling.amazonaws.com" } }
+    },
+    {
+      "Sid": "ManageEndpointAlarms",
+      "Effect": "Allow",
+      "Action": ["cloudwatch:PutMetricAlarm", "cloudwatch:DeleteAlarms", "cloudwatch:TagResource"],
+      "Resource": "arn:aws:cloudwatch:<REGION>:<ACCOUNT_ID>:alarm:<ENDPOINT_NAME_PREFIX>*"
+    },
+    {
+      "Sid": "ReadAlarmsForRollbackConfiguration",
+      "Effect": "Allow",
+      "Action": "cloudwatch:DescribeAlarms",
+      "Resource": "*"
+    },
+    {
+      "Sid": "GuardrailDenyModelsWithoutNetworkIsolation",
+      "Effect": "Deny",
+      "Action": "sagemaker:CreateModel",
+      "Resource": "*",
+      "Condition": { "Bool": { "sagemaker:NetworkIsolation": "false" } }
+    },
+    {
+      "Sid": "GuardrailDenyModelsWithoutVpc",
+      "Effect": "Deny",
+      "Action": "sagemaker:CreateModel",
+      "Resource": "*",
+      "Condition": { "Null": { "sagemaker:VpcSubnets": "true" } }
+    }
+  ]
+}

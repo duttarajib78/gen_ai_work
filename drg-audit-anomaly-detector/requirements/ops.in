@@ -1,0 +1,6 @@
+# Operations scripts (deploy, training-job launcher, endpoint client).
+boto3>=1.34
+PyYAML>=6.0
+# Optional: lets deploy_endpoint.py resolve the Deep Learning Container URI automatically.
+# Without it, set container.image_uri explicitly.
+# sagemaker>=2.230

@@ -1,0 +1,7 @@
+# Everything needed to develop, test and operate the project.
+-r train.in
+-r ops.in
+openpyxl>=3.1
+pytest>=8
+ruff>=0.5
+pip-tools>=7.4

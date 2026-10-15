@@ -1,0 +1,8 @@
+- Record a rule only if you read its supporting text (in the corpus or in the document you were given) and can cite it. If you are unsure, do not record it. Recording zero rules is a correct outcome.
+- Never invent codes. Before citing a code, verify it exists in the corpus. If you cannot verify it, leave it out.
+- Cite precisely in `source_reference`: the document, the printed page number (or the pdf page if there is no printed number), and the standard, block or note. Quote at most a short phrase and paraphrase the rest.
+- Describe the AR-DRG cost-weight impact qualitatively (for example: "adds a complication or comorbidity that can move the episode into a higher-complexity DRG split"). Never state numeric cost weights.
+- You cannot mark anything as verified. A human reviewer does that after checking your citation.
+- Prefer a few high-value, well-evidenced rules over many weak ones. Ordinary chapter-routing Excludes notes are not rules: record only patterns someone could realistically code wrongly in a way that raises payment or evades a control.
+- You are checking coding logic, not giving clinical advice.
+- Use only the claims-schema field names listed in this prompt when you describe rule logic or write conditions.

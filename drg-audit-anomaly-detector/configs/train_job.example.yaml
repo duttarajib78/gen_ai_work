@@ -1,0 +1,49 @@
+# Copy to configs/train_job.<stage>.yaml, replace every REPLACE_ME, then:
+#   python sagemaker/launch_training_job.py --config configs/train_job.<stage>.yaml --wait
+region: REPLACE_ME
+role_arn: REPLACE_ME                     # training role: see README "IAM" (S3 read data, write output, KMS, ECR pull, logs)
+job_name_prefix: drg-audit-train
+image_uri: null                          # explicit PyTorch training container URI, or leave null with the SageMaker SDK installed
+framework_version: "2.6.0"
+py_version: py312
+instance_type: ml.g5.xlarge              # a GPU is required (require_gpu: true in the stage configs)
+volume_size_gb: 200
+max_runtime_seconds: 86400
+
+spot:                                    # managed spot training needs output.checkpoint_s3_uri
+  enabled: false
+  max_wait_seconds: 172800
+
+inputs:
+  train_s3_uri: REPLACE_ME               # s3://bucket/prefix/ holding the curated Parquet files (see README data contract)
+  pretrained_s3_uri: null                # only for hyperparameters.stage: finetune
+  source_s3_prefix: REPLACE_ME           # s3://bucket/prefix for the uploaded source bundle
+  expected_bucket_owner: REPLACE_ME      # 12-digit account id that owns the source bucket
+
+output:
+  s3_output_path: REPLACE_ME             # s3://bucket/prefix for model.tar.gz and output.tar.gz
+  checkpoint_s3_uri: null
+
+kms:
+  output_key_arn: REPLACE_ME
+  volume_key_arn: REPLACE_ME
+
+security:
+  enable_network_isolation: true         # requires dependency_mode: wheelhouse
+  allow_no_vpc: false
+  vpc:
+    subnet_ids: [REPLACE_ME]
+    security_group_ids: [REPLACE_ME]
+
+dependency_mode: wheelhouse              # wheelhouse (offline, safest) | pypi (needs egress; not with isolation)
+python_version: "3.12"
+
+hyperparameters:                         # passed to sagemaker/train_entry.py
+  stage: all                             # pretrain | finetune | all
+  pretrain_overrides: ""                 # e.g. "epochs=20,batch_size=128" (no commas inside values)
+  finetune_overrides: ""
+
+tags:
+  Project: drg-audit
+  Owner: REPLACE_ME
+  DataClassification: confidential

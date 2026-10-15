@@ -1,0 +1,388 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  dx-supporting-lists foundation: encryption key, private artifacts bucket, container registry, least-privilege SageMaker execution role,
+  locked-down network egress and (optionally) VPC endpoints and a CodeBuild project to build the image. Deploy this first.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Identity }
+        Parameters: [EnvironmentName]
+      - Label: { default: "Network (private subnets; the endpoint has no inbound access and no internet egress by default)" }
+        Parameters: [VpcId, VpcCidr, PrivateSubnetIds, PrivateRouteTableIds, CreateVpcEndpoints, S3PrefixListId]
+      - Label: { default: Encryption }
+        Parameters: [CreateKmsKey, ExistingKmsKeyArn]
+      - Label: { default: "Amazon Bedrock (exact resources the endpoint may invoke)" }
+        Parameters: [BedrockResourceArns]
+      - Label: { default: Image build }
+        Parameters: [CreateBuildProject]
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedPattern: "^[a-z][a-z0-9-]{1,14}$"
+    ConstraintDescription: 2-15 characters, lower-case letters, digits and hyphens, starting with a letter.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  VpcCidr:
+    Type: String
+    Description: CIDR of the VPC. The endpoint's security group may send HTTPS only to this range (where the interface VPC endpoints live).
+    AllowedPattern: "^(\\d{1,3}\\.){3}\\d{1,3}/\\d{1,2}$"
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets (at least two, in different Availability Zones) for the endpoint instances.
+  PrivateRouteTableIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: Route tables of those subnets. Only used when CreateVpcEndpoints is true (for the S3 gateway endpoint).
+  CreateVpcEndpoints:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      true creates the interface endpoints (bedrock-runtime, logs, kms, ecr.api, ecr.dkr) and the S3 gateway endpoint. Leave false if your VPC already has them
+      (creating a second one with private DNS fails).
+  S3PrefixListId:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional managed prefix list of the S3 gateway endpoint (aws ec2 describe-managed-prefix-lists --filters Name=prefix-list-name,Values=com.amazonaws.REGION.s3).
+      When set, the security group may also send HTTPS to S3 through the gateway endpoint.
+  CreateKmsKey:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  ExistingKmsKeyArn:
+    Type: String
+    Default: ""
+    Description: Used when CreateKmsKey is false. Leave both empty to fall back to S3-managed encryption (SSE-S3).
+  BedrockResourceArns:
+    Type: CommaDelimitedList
+    Description: >-
+      Exact ARNs the endpoint may invoke: the inference profile(s) AND the foundation models in the regions they route to. Generate them with
+      `dx-support bedrock-arns --account <id>` (it reads the same DX_* settings the endpoint will use).
+  CreateBuildProject:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Create a CodeBuild project that builds the image without local Docker.
+
+Conditions:
+  CreateKey: !Equals [!Ref CreateKmsKey, "true"]
+  HasExistingKey: !Not [!Equals [!Ref ExistingKmsKeyArn, ""]]
+  UseKms: !Or [!Condition CreateKey, !Condition HasExistingKey]
+  CreateEndpoints: !Equals [!Ref CreateVpcEndpoints, "true"]
+  HasS3PrefixList: !Not [!Equals [!Ref S3PrefixListId, ""]]
+  CreateBuild: !Equals [!Ref CreateBuildProject, "true"]
+
+Resources:
+  # ---------------------------------------------------------------- encryption
+  KmsKey:
+    Type: AWS::KMS::Key
+    Condition: CreateKey
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "dx-support ${EnvironmentName}: artifacts bucket, result store, volumes and ECR"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DelegateToIamPolicies
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" }
+            Action: "kms:*"
+            Resource: "*"
+  KmsAlias:
+    Type: AWS::KMS::Alias
+    Condition: CreateKey
+    Properties:
+      AliasName: !Sub "alias/dx-support-${EnvironmentName}"
+      TargetKeyId: !Ref KmsKey
+
+  # ---------------------------------------------------------------- storage
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "dx-support-${EnvironmentName}-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault: !If
+              - UseKms
+              - SSEAlgorithm: aws:kms
+                KMSMasterKeyID: !If [CreateKey, !GetAtt KmsKey.Arn, !Ref ExistingKmsKeyArn]
+              - SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 7 }
+          - Id: expire-noncurrent-versions
+            Status: Enabled
+            NoncurrentVersionExpiration: { NoncurrentDays: 90 }
+  ArtifactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt ArtifactsBucket.Arn, !Sub "${ArtifactsBucket.Arn}/*"]
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
+
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub "dx-support-${EnvironmentName}"
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration: { ScanOnPush: true }
+      EncryptionConfiguration: !If
+        - UseKms
+        - EncryptionType: KMS
+          KmsKey: !If [CreateKey, !GetAtt KmsKey.Arn, !Ref ExistingKmsKeyArn]
+        - EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep the 25 newest images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":25},"action":{"type":"expire"}}]}'
+
+  # ---------------------------------------------------------------- network: no inbound at all, HTTPS egress only to the VPC (interface endpoints) and optionally S3
+  ModelSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: dx-support endpoint instances - no inbound; HTTPS only to VPC endpoints
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - Description: HTTPS to the interface VPC endpoints (Bedrock, CloudWatch Logs, KMS, ECR)
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+        - !If
+          - HasS3PrefixList
+          - Description: HTTPS to Amazon S3 through the gateway endpoint
+            IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            DestinationPrefixListId: !Ref S3PrefixListId
+          - !Ref AWS::NoValue
+      Tags: [{ Key: Name, Value: !Sub "dx-support-${EnvironmentName}-endpoint" }]
+  VpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEndpoints
+    Properties:
+      GroupDescription: dx-support VPC interface endpoints - HTTPS from the endpoint instances only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: HTTPS from the dx-support endpoint instances
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref ModelSecurityGroup
+      Tags: [{ Key: Name, Value: !Sub "dx-support-${EnvironmentName}-vpce" }]
+  BedrockRuntimeVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties: { VpcId: !Ref VpcId, VpcEndpointType: Interface, ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-runtime", PrivateDnsEnabled: true, SubnetIds: !Ref PrivateSubnetIds, SecurityGroupIds: [!Ref VpcEndpointSecurityGroup] }
+  LogsVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties: { VpcId: !Ref VpcId, VpcEndpointType: Interface, ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs", PrivateDnsEnabled: true, SubnetIds: !Ref PrivateSubnetIds, SecurityGroupIds: [!Ref VpcEndpointSecurityGroup] }
+  KmsVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties: { VpcId: !Ref VpcId, VpcEndpointType: Interface, ServiceName: !Sub "com.amazonaws.${AWS::Region}.kms", PrivateDnsEnabled: true, SubnetIds: !Ref PrivateSubnetIds, SecurityGroupIds: [!Ref VpcEndpointSecurityGroup] }
+  EcrApiVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties: { VpcId: !Ref VpcId, VpcEndpointType: Interface, ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api", PrivateDnsEnabled: true, SubnetIds: !Ref PrivateSubnetIds, SecurityGroupIds: [!Ref VpcEndpointSecurityGroup] }
+  EcrDkrVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties: { VpcId: !Ref VpcId, VpcEndpointType: Interface, ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr", PrivateDnsEnabled: true, SubnetIds: !Ref PrivateSubnetIds, SecurityGroupIds: [!Ref VpcEndpointSecurityGroup] }
+  S3GatewayVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties: { VpcId: !Ref VpcId, VpcEndpointType: Gateway, ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3", RouteTableIds: !Ref PrivateRouteTableIds }
+
+  # ---------------------------------------------------------------- the SageMaker execution role (what the container can do)
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: !Sub "dx-support ${EnvironmentName} endpoint execution role: invoke the named Bedrock models, read the model artifact, read and write the result store"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: sagemaker.amazonaws.com }
+            Action: "sts:AssumeRole"
+            Condition: { StringEquals: { "aws:SourceAccount": !Ref "AWS::AccountId" } }
+      Policies:
+        - PolicyName: dx-support-endpoint
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: PullTheImage
+                Effect: Allow
+                Action: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"]
+                Resource: !GetAtt EcrRepository.Arn
+              - Sid: EcrLogin
+                Effect: Allow
+                Action: "ecr:GetAuthorizationToken"
+                Resource: "*"
+              - Sid: SageMakerLogs
+                Effect: Allow
+                Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/sagemaker/Endpoints/*"
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/sagemaker/ProcessingJobs*"
+              - Sid: ReadTheModelArtifact
+                Effect: Allow
+                Action: "s3:GetObject"
+                Resource: !Sub "${ArtifactsBucket.Arn}/model/*"
+              - Sid: ReadAndWriteTheResultStore
+                Effect: Allow
+                Action: ["s3:GetObject", "s3:PutObject"]
+                Resource: !Sub "${ArtifactsBucket.Arn}/serve/*"
+              - Sid: ReleaseTheRunLock
+                Effect: Allow
+                Action: "s3:DeleteObject"
+                Resource: !Sub "${ArtifactsBucket.Arn}/serve/*/.run.lock"
+              - Sid: ListOnlyTheseFolders
+                Effect: Allow
+                Action: "s3:ListBucket"
+                Resource: !GetAtt ArtifactsBucket.Arn
+                Condition: { StringLike: { "s3:prefix": ["model/*", "serve/*"] } }
+              - Sid: InvokeTheNamedBedrockModelsOnly
+                Effect: Allow
+                Action: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+                Resource: !Ref BedrockResourceArns
+              - Sid: AttachToTheVpc
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:CreateNetworkInterfacePermission
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DeleteNetworkInterfacePermission
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeDhcpOptions
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                Resource: "*"
+              - !If
+                - UseKms
+                - Sid: UseTheDataKey
+                  Effect: Allow
+                  Action: ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
+                  Resource: !If [CreateKey, !GetAtt KmsKey.Arn, !Ref ExistingKmsKeyArn]
+                - !Ref AWS::NoValue
+
+  # ---------------------------------------------------------------- image build without local Docker (optional)
+  BuildRole:
+    Type: AWS::IAM::Role
+    Condition: CreateBuild
+    Properties:
+      Description: !Sub "dx-support ${EnvironmentName} CodeBuild: build the image and push it to the repository"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codebuild.amazonaws.com }
+            Action: "sts:AssumeRole"
+            Condition: { StringEquals: { "aws:SourceAccount": !Ref "AWS::AccountId" } }
+      Policies:
+        - PolicyName: dx-support-build
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/dx-support-${EnvironmentName}*"
+              - Sid: ReadTheSource
+                Effect: Allow
+                Action: ["s3:GetObject", "s3:GetObjectVersion"]
+                Resource: !Sub "${ArtifactsBucket.Arn}/source/*"
+              - Sid: LocateTheSourceBucket
+                Effect: Allow
+                Action: ["s3:GetBucketAcl", "s3:GetBucketLocation"]
+                Resource: !GetAtt ArtifactsBucket.Arn
+              - Sid: PushTheImage
+                Effect: Allow
+                Action: ["ecr:BatchCheckLayerAvailability", "ecr:CompleteLayerUpload", "ecr:InitiateLayerUpload", "ecr:PutImage", "ecr:UploadLayerPart", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+                Resource: !GetAtt EcrRepository.Arn
+              - Sid: EcrLogin
+                Effect: Allow
+                Action: "ecr:GetAuthorizationToken"
+                Resource: "*"
+              - !If
+                - UseKms
+                - Sid: UseTheDataKey
+                  Effect: Allow
+                  Action: ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
+                  Resource: !If [CreateKey, !GetAtt KmsKey.Arn, !Ref ExistingKmsKeyArn]
+                - !Ref AWS::NoValue
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Condition: CreateBuild
+    Properties:
+      Name: !Sub "dx-support-${EnvironmentName}-image"
+      Description: Builds the dx-support container image from source.zip and pushes it to ECR
+      ServiceRole: !GetAtt BuildRole.Arn
+      Artifacts: { Type: NO_ARTIFACTS }
+      Source:
+        Type: S3
+        Location: !Sub "${ArtifactsBucket}/source/source.zip"
+        BuildSpec: buildspec.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - { Name: AWS_REGION, Type: PLAINTEXT, Value: !Ref "AWS::Region" }
+          - { Name: ECR_REPO_URI, Type: PLAINTEXT, Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}/${EcrRepository}" }
+      EncryptionKey: !If [UseKms, !If [CreateKey, !GetAtt KmsKey.Arn, !Ref ExistingKmsKeyArn], !Ref AWS::NoValue]
+      LogsConfig:
+        CloudWatchLogs: { Status: ENABLED }
+      TimeoutInMinutes: 30
+
+Outputs:
+  ExecutionRoleArn:
+    Value: !GetAtt ExecutionRole.Arn
+    Export: { Name: !Sub "${AWS::StackName}-ExecutionRoleArn" }
+  SecurityGroupId:
+    Value: !Ref ModelSecurityGroup
+    Export: { Name: !Sub "${AWS::StackName}-SecurityGroupId" }
+  SubnetIds:
+    Value: !Join [",", !Ref PrivateSubnetIds]
+    Export: { Name: !Sub "${AWS::StackName}-SubnetIds" }
+  ArtifactsBucketName:
+    Value: !Ref ArtifactsBucket
+    Export: { Name: !Sub "${AWS::StackName}-ArtifactsBucketName" }
+  KmsKeyArn:
+    Value: !If [UseKms, !If [CreateKey, !GetAtt KmsKey.Arn, !Ref ExistingKmsKeyArn], "none"]
+    Export: { Name: !Sub "${AWS::StackName}-KmsKeyArn" }
+  EcrRepositoryUri:
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}/${EcrRepository}"
+  BuildProjectName:
+    Value: !If [CreateBuild, !Ref BuildProject, "none"]

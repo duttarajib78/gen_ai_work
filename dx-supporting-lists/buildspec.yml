@@ -1,0 +1,18 @@
+version: 0.2
+# AWS CodeBuild: builds the image and pushes it to ECR. Used by deploy/scripts/build_image_codebuild.sh when Docker is not available in your
+# SageMaker Code Editor space. Environment variables AWS_REGION, ECR_REPO_URI and IMAGE_TAG are set by that script / the CodeBuild project.
+env:
+  variables:
+    IMAGE_TAG: "unset"
+phases:
+  pre_build:
+    commands:
+      - test "$IMAGE_TAG" != "unset"
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${ECR_REPO_URI%%/*}"
+  build:
+    commands:
+      - docker build --pull -t "$ECR_REPO_URI:$IMAGE_TAG" .
+  post_build:
+    commands:
+      - docker push "$ECR_REPO_URI:$IMAGE_TAG"
+      - echo "ImageUri=$ECR_REPO_URI:$IMAGE_TAG"

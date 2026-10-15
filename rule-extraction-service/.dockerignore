@@ -1,0 +1,25 @@
+.git
+.github
+.venv
+**/__pycache__
+*.pyc
+tests
+docs
+infra
+scripts
+# Licensed / generated data must never enter an image layer:
+source_docs
+corpus
+checkpoints
+sample_output
+dist
+build
+logs
+**/*.pdf
+**/*.PDF
+**/*.xml
+**/*.XML
+**/*.xlsx
+# Local secrets and state:
+.env
+.env.*

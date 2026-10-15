@@ -1,0 +1,50 @@
+# Stage 2: joint fine-tuning of encoder + cascaded classifier. Also defines the serving defaults that are
+# written into the model bundle (inference_config.json). Override with --finetune-set key=value.
+val_fraction: 0.10
+batch_size: 32
+eval_batch_size: 64
+epochs: 100
+encoder_learning_rate: 2.0e-5
+classifier_learning_rate: 1.0e-4
+weight_decay: 0.01
+warmup_ratio: 0.10
+temperature: 0.30
+mask_probability: 0.15
+grad_clip_norm: 1.0
+early_stopping_patience: 6
+classifier_hidden_dim: 128
+
+loss_weights:
+  contrastive: 0.5
+  mdc: 1.0
+  base: 1.2
+  split: 0.8
+
+runtime:
+  seed: 42
+  require_gpu: true
+  amp: true
+  num_workers: 4
+  checkpoint_dir: null
+
+serving:                    # baked into the bundle; selected values can be overridden by DRG_AUDIT_* env vars
+  decision:
+    confidence_threshold: 0.85
+  limits:                   # hard request bounds enforced by the endpoint (reject, never clamp)
+    max_payload_bytes: 8388608
+    max_records: 256
+    max_codes_per_array: 512
+    max_code_length: 32
+    max_los_days: 3650
+    max_age_years: 130.0
+    max_theatre_minutes: 100000.0
+    max_ventilation_hours: 8760.0
+    max_abs_benefit: 1.0e9
+    min_confidence_threshold: 0.50
+  runtime:
+    device: auto            # auto | cpu | cuda
+    precision: fp32         # fp32 | fp16 (CUDA only) | bf16
+    max_batch_size: 64
+    torch_threads: null     # null: set by DRG_AUDIT_TORCH_THREADS or the torch default
+    dynamic_padding: true
+    unknown_version_policy: fallback   # fallback (index 0 + warning) | reject (record is skipped)

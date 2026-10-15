@@ -1,0 +1,276 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  dx-supporting-lists SageMaker real-time endpoint: model, endpoint configuration, blue/green endpoint with automatic rollback, autoscaling and alarms.
+  Deploy after the foundation stack, once the image is pushed and the reference data is packaged.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Release }
+        Parameters: [FoundationStackName, EnvironmentName, KmsKeyArn, ImageUri, ModelDataUrl]
+      - Label: { default: Capacity }
+        Parameters: [InstanceType, MinCapacity, MaxCapacity, TargetInvocationsPerInstance, VolumeSizeInGB]
+      - Label: { default: Models }
+        Parameters: [DxModel, DxBriefModel, DxRouteModel, DxJudgeModel, InferenceProfilePrefix, DxThinking, PromptCaching, GuardrailId, GuardrailVersion]
+      - Label: { default: "Limits and cost controls" }
+        Parameters: [LlmConcurrency, MaxCostUsdPerCategory, MaxCostUsdPerHour, MaxCategoriesPerRequest, MaxConcurrentRequests, AllowCompute]
+      - Label: { default: Operations }
+        Parameters: [CacheSalt, LogCalls, AlarmTopicArn, CanaryPercent, CanaryWaitSeconds]
+
+Parameters:
+  FoundationStackName:
+    Type: String
+    Description: Name of the deployed foundation stack (its exports supply the role, network, bucket and key).
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedPattern: "^[a-z][a-z0-9-]{1,14}$"
+  KmsKeyArn:
+    Type: String
+    Default: none
+    Description: The foundation stack's KmsKeyArn output ("none" when the bucket uses S3-managed encryption). Encrypts the instance volume and the result store.
+  ImageUri:
+    Type: String
+    Description: Full image URI with an immutable tag (the foundation stack's EcrRepositoryUri plus the tag your build printed).
+    AllowedPattern: "^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.[a-z.]+/[a-z0-9._/-]+:[A-Za-z0-9._-]{1,128}$"
+  ModelDataUrl:
+    Type: String
+    Description: s3:// URI of the packaged reference data (printed by package_model_data.sh).
+    AllowedPattern: "^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/model/[A-Za-z0-9._-]+/model\\.tar\\.gz$"
+  InstanceType:
+    Type: String
+    Default: ml.m5.large
+    AllowedPattern: "^ml\\.[a-z0-9]+\\.[a-z0-9]+$"
+    Description: CPU only is enough (the work waits on Bedrock and S3). Avoid instance types with local NVMe storage when a KMS key encrypts the volume.
+  MinCapacity:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    Description: At least two keeps the endpoint available through an instance replacement.
+  MaxCapacity:
+    Type: Number
+    Default: 6
+    MinValue: 1
+  TargetInvocationsPerInstance:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    Description: Autoscaling target (invocations per instance per minute). Requests are slow and I/O-bound, so keep it low.
+  VolumeSizeInGB:
+    Type: Number
+    Default: 30
+    MinValue: 5
+  DxModel:
+    Type: String
+    Default: claude-sonnet-5
+    Description: Catalog alias or explicit Bedrock id. The default is the model the earlier build was validated with; changing it changes the cache fingerprint.
+  DxBriefModel: { Type: String, Default: "" }
+  DxRouteModel: { Type: String, Default: "", Description: "Empty = DxModel. A cheaper router must be measured first (dx-support validate-retrieval)." }
+  DxJudgeModel: { Type: String, Default: "" }
+  InferenceProfilePrefix:
+    Type: String
+    Default: au
+    AllowedValues: [au, apac, us, eu, jp, global, none]
+    Description: >-
+      au keeps inference inside Australia (the safest default for this data's residency; not every model has an au profile). global has the most
+      capacity and is cheaper but may process anywhere. none uses the in-region base model id (only for models that allow it).
+  DxThinking:
+    Type: String
+    Default: low
+    AllowedValues: [disabled, low, medium, high, adaptive]
+  PromptCaching:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  GuardrailId: { Type: String, Default: "" }
+  GuardrailVersion: { Type: String, Default: "" }
+  LlmConcurrency: { Type: Number, Default: 16, MinValue: 1, MaxValue: 256, Description: "Model calls in flight per instance. Stay inside your Bedrock quotas." }
+  MaxCostUsdPerCategory: { Type: Number, Default: 3, MinValue: 0.01, Description: "Spend cap for computing one category." }
+  MaxCostUsdPerHour: { Type: Number, Default: 100, MinValue: 0.01, Description: "Per-instance circuit breaker: no new model calls once this much was spent in the last hour." }
+  MaxCategoriesPerRequest: { Type: Number, Default: 3, MinValue: 1, MaxValue: 50 }
+  MaxConcurrentRequests: { Type: Number, Default: 8, MinValue: 1, MaxValue: 128 }
+  AllowCompute:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: false makes the endpoint read-only (it serves stored results and never calls a model).
+  CacheSalt: { Type: String, Default: "", Description: "Change to force every result to be recomputed under a new cache namespace." }
+  LogCalls: { Type: String, Default: "true", AllowedValues: ["true", "false"], Description: "One log line per model call: stage, tokens, cost, duration. Never prompts." }
+  AlarmTopicArn: { Type: String, Default: "", Description: "Optional SNS topic notified by the alarms." }
+  CanaryPercent: { Type: Number, Default: 50, MinValue: 1, MaxValue: 99, Description: "Share of capacity moved first when updating the endpoint." }
+  CanaryWaitSeconds: { Type: Number, Default: 300, MinValue: 0, MaxValue: 3600, Description: "Bake time before the rest of the traffic moves; the rollback alarms watch it." }
+
+Conditions:
+  HasBrief: !Not [!Equals [!Ref DxBriefModel, ""]]
+  HasRoute: !Not [!Equals [!Ref DxRouteModel, ""]]
+  HasJudge: !Not [!Equals [!Ref DxJudgeModel, ""]]
+  HasGuardrail: !Not [!Equals [!Ref GuardrailId, ""]]
+  HasCacheSalt: !Not [!Equals [!Ref CacheSalt, ""]]
+  HasTopic: !Not [!Equals [!Ref AlarmTopicArn, ""]]
+  HasKmsKey: !Not [!Equals [!Ref KmsKeyArn, none]]
+
+Resources:
+  Model:
+    Type: AWS::SageMaker::Model
+    Properties:
+      ExecutionRoleArn:
+        Fn::ImportValue: !Sub "${FoundationStackName}-ExecutionRoleArn"
+      EnableNetworkIsolation: false          # required: the container must reach Bedrock; the VPC and security group are what confine it
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub "${FoundationStackName}-SecurityGroupId"
+        Subnets: !Split
+          - ","
+          - Fn::ImportValue: !Sub "${FoundationStackName}-SubnetIds"
+      PrimaryContainer:
+        Image: !Ref ImageUri
+        Mode: SingleModel
+        ModelDataUrl: !Ref ModelDataUrl
+        Environment:
+          DX_ENV: production
+          DX_BACKEND: bedrock
+          DX_AWS_REGION: !Ref AWS::Region
+          DX_DATA_DIR: /opt/ml/model/data
+          DX_STORE_URI: !Sub
+            - "s3://${Bucket}"
+            - Bucket:
+                Fn::ImportValue: !Sub "${FoundationStackName}-ArtifactsBucketName"
+          DX_STORE_KMS_KEY_ID: !If [HasKmsKey, !Ref KmsKeyArn, !Ref AWS::NoValue]
+          DX_MODEL: !Ref DxModel
+          DX_BRIEF_MODEL: !If [HasBrief, !Ref DxBriefModel, !Ref AWS::NoValue]
+          DX_ROUTE_MODEL: !If [HasRoute, !Ref DxRouteModel, !Ref AWS::NoValue]
+          DX_JUDGE_MODEL: !If [HasJudge, !Ref DxJudgeModel, !Ref AWS::NoValue]
+          DX_INFERENCE_PROFILE_PREFIX: !Ref InferenceProfilePrefix
+          DX_THINKING: !Ref DxThinking
+          DX_PROMPT_CACHING: !Ref PromptCaching
+          DX_GUARDRAIL_ID: !If [HasGuardrail, !Ref GuardrailId, !Ref AWS::NoValue]
+          DX_GUARDRAIL_VERSION: !If [HasGuardrail, !Ref GuardrailVersion, !Ref AWS::NoValue]
+          DX_LLM_CONCURRENCY: !Ref LlmConcurrency
+          DX_MAX_COST_USD_PER_CATEGORY: !Ref MaxCostUsdPerCategory
+          DX_MAX_COST_USD_PER_HOUR: !Ref MaxCostUsdPerHour
+          DX_MAX_CATEGORIES_PER_REQUEST: !Ref MaxCategoriesPerRequest
+          DX_MAX_CONCURRENT_REQUESTS: !Ref MaxConcurrentRequests
+          DX_ALLOW_COMPUTE: !Ref AllowCompute
+          DX_CACHE_SALT: !If [HasCacheSalt, !Ref CacheSalt, !Ref AWS::NoValue]
+          DX_LOG_CALLS: !Ref LogCalls
+
+  EndpointConfig:
+    Type: AWS::SageMaker::EndpointConfig
+    Properties:
+      KmsKeyId: !If [HasKmsKey, !Ref KmsKeyArn, !Ref AWS::NoValue]
+      ProductionVariants:
+        - VariantName: AllTraffic
+          ModelName: !GetAtt Model.ModelName
+          InstanceType: !Ref InstanceType
+          InitialInstanceCount: !Ref MinCapacity
+          InitialVariantWeight: 1
+          ContainerStartupHealthCheckTimeoutInSeconds: 600
+          ModelDataDownloadTimeoutInSeconds: 600
+          VolumeSizeInGB: !Ref VolumeSizeInGB
+          RoutingConfig:
+            RoutingStrategy: LEAST_OUTSTANDING_REQUESTS      # requests last up to minutes: send the next one to the least busy instance, not round-robin
+
+  Endpoint:
+    Type: AWS::SageMaker::Endpoint
+    Properties:
+      EndpointName: !Sub "${EnvironmentName}-dx-support"
+      EndpointConfigName: !GetAtt EndpointConfig.EndpointConfigName
+      DeploymentConfig:
+        BlueGreenUpdatePolicy:
+          TrafficRoutingConfiguration:
+            Type: CANARY
+            CanarySize: { Type: CAPACITY_PERCENT, Value: !Ref CanaryPercent }
+            WaitIntervalInSeconds: !Ref CanaryWaitSeconds
+          TerminationWaitInSeconds: 120
+          MaximumExecutionTimeoutInSeconds: 1800
+        AutoRollbackConfiguration:
+          Alarms:
+            - AlarmName: !Ref Errors5xxAlarm
+            - AlarmName: !Ref ModelErrorsAlarm
+
+  # The alarms name the endpoint as text, not with a reference: the endpoint's rollback configuration depends on them, so a reference back would be circular.
+  Errors5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: The container returned server errors (also the automatic-rollback trigger during an update)
+      Namespace: AWS/SageMaker
+      MetricName: Invocation5XXErrors
+      Dimensions: [{ Name: EndpointName, Value: !Sub "${EnvironmentName}-dx-support" }, { Name: VariantName, Value: AllTraffic }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+  ModelErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Invocations failed inside the model container (also an automatic-rollback trigger)
+      Namespace: AWS/SageMaker
+      MetricName: InvocationModelErrors
+      Dimensions: [{ Name: EndpointName, Value: !Sub "${EnvironmentName}-dx-support" }, { Name: VariantName, Value: AllTraffic }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+  BusyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Callers are being told "busy" (HTTP 429) or sending bad requests (4xx) - consider more capacity or a higher MaxConcurrentRequests
+      Namespace: AWS/SageMaker
+      MetricName: Invocation4XXErrors
+      Dimensions: [{ Name: EndpointName, Value: !Sub "${EnvironmentName}-dx-support" }, { Name: VariantName, Value: AllTraffic }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 30
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+  SlowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: p99 model latency is close to the 60-second limit of regular invocations - callers should use the streaming API for uncached work
+      Namespace: AWS/SageMaker
+      MetricName: ModelLatency
+      Dimensions: [{ Name: EndpointName, Value: !Sub "${EnvironmentName}-dx-support" }, { Name: VariantName, Value: AllTraffic }]
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 55000000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: sagemaker
+      ScalableDimension: sagemaker:variant:DesiredInstanceCount
+      ResourceId: !Sub "endpoint/${Endpoint.EndpointName}/variant/AllTraffic"
+      MinCapacity: !Ref MinCapacity
+      MaxCapacity: !Ref MaxCapacity
+  ScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${EnvironmentName}-dx-support-invocations"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: !Ref TargetInvocationsPerInstance
+        ScaleInCooldown: 600
+        ScaleOutCooldown: 120
+        PredefinedMetricSpecification:
+          PredefinedMetricType: SageMakerVariantInvocationsPerInstance
+
+Outputs:
+  EndpointName:
+    Value: !GetAtt Endpoint.EndpointName
+  EndpointArn:
+    Value: !Ref Endpoint
+  InvokeExample:
+    Value: !Sub "dx-support invoke --endpoint ${EnvironmentName}-dx-support --region ${AWS::Region} --categories H25 --families achi,mbs"

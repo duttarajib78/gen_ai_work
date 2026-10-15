@@ -1,0 +1,313 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Foundation for the rule-extraction SageMaker endpoint: customer-managed KMS key, artifact bucket, job-state table,
+  work queue (+DLQ), ECR repository, and a least-privilege endpoint execution role.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: rule-extractor
+    AllowedPattern: "^[a-z][a-z0-9-]{2,23}$"
+    ConstraintDescription: 3-24 chars; keeps the derived S3 bucket name within 63 characters.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+  MetricsNamespace:
+    Type: String
+    Default: RuleExtractor
+  BedrockFoundationModelArns:
+    Type: CommaDelimitedList
+    Description: >
+      Foundation-model ARNs the role may invoke. Cross-Region inference profiles need access to the model in EVERY
+      destination Region. Defaults cover the 'au' geography (Sydney + Melbourne). Tighten or change for other geographies;
+      for 'global' profiles also add arn:aws:bedrock:::foundation-model/<model> (this widens where inference may run).
+    Default: >-
+      arn:aws:bedrock:ap-southeast-2::foundation-model/anthropic.claude-sonnet-5,
+      arn:aws:bedrock:ap-southeast-4::foundation-model/anthropic.claude-sonnet-5,
+      arn:aws:bedrock:ap-southeast-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0,
+      arn:aws:bedrock:ap-southeast-4::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0
+  BedrockInferenceProfileArns:
+    Type: CommaDelimitedList
+    Description: Inference-profile ARNs the role may invoke (source Regions). Must match RULE_EXTRACTOR_BEDROCK_PROFILE_PREFIX.
+    Default: >-
+      arn:aws:bedrock:ap-southeast-2:*:inference-profile/au.anthropic.claude-sonnet-5,
+      arn:aws:bedrock:ap-southeast-4:*:inference-profile/au.anthropic.claude-sonnet-5,
+      arn:aws:bedrock:ap-southeast-2:*:inference-profile/au.anthropic.claude-haiku-4-5-20251001-v1:0,
+      arn:aws:bedrock:ap-southeast-4:*:inference-profile/au.anthropic.claude-haiku-4-5-20251001-v1:0
+  ImageRetentionCount:
+    Type: Number
+    Default: 30
+    MinValue: 5
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+  Key:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "${ProjectName}-${Environment} data key (S3, DynamoDB, SQS)"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  KeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ProjectName}-${Environment}"
+      TargetKeyId: !Ref Key
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-${Environment}-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: "aws:kms"
+              KMSMasterKeyID: !GetAtt Key.Arn
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: expire-noncurrent-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  StateTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${ProjectName}-${Environment}-state"
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [IsProd, true, false]
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: gsi1pk
+          AttributeType: S
+        - AttributeName: gsi1sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - AttributeName: gsi1pk
+              KeyType: HASH
+            - AttributeName: gsi1sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt Key.Arn
+
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-${Environment}-work-dlq"
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: !GetAtt Key.Arn
+
+  WorkQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-${Environment}-work"
+      VisibilityTimeout: 600
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+      KmsMasterKeyId: !GetAtt Key.Arn
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 10
+
+  QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref WorkQueue
+        - !Ref DeadLetterQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "sqs:*"
+            Resource:
+              - !GetAtt WorkQueue.Arn
+              - !GetAtt DeadLetterQueue.Arn
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ProjectName}-${Environment}"
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub >-
+          {"rules":[{"rulePriority":1,"description":"keep the most recent images",
+          "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":${ImageRetentionCount}},
+          "action":{"type":"expire"}}]}
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-endpoint"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeClaudeFoundationModels
+                Effect: Allow
+                Action: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+                Resource: !Ref BedrockFoundationModelArns
+              - Sid: InvokeClaudeInferenceProfiles
+                Effect: Allow
+                Action: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+                Resource: !Ref BedrockInferenceProfileArns
+              - Sid: DiscoverInferenceProfiles
+                Effect: Allow
+                Action: ["bedrock:ListInferenceProfiles", "bedrock:GetInferenceProfile"]
+                Resource: "*"
+              - Sid: ArtifactObjects
+                Effect: Allow
+                Action: ["s3:GetObject", "s3:PutObject"]
+                Resource: !Sub "${ArtifactBucket.Arn}/*"
+              - Sid: ArtifactListing
+                Effect: Allow
+                Action: "s3:ListBucket"
+                Resource: !GetAtt ArtifactBucket.Arn
+              - Sid: DataKey
+                Effect: Allow
+                Action: ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
+                Resource: !GetAtt Key.Arn
+              - Sid: JobState
+                Effect: Allow
+                Action: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query", "dynamodb:BatchWriteItem"]
+                Resource:
+                  - !GetAtt StateTable.Arn
+                  - !Sub "${StateTable.Arn}/index/*"
+              - Sid: WorkQueueAccess
+                Effect: Allow
+                Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:SendMessage", "sqs:SendMessageBatch", "sqs:GetQueueAttributes"]
+                Resource: !GetAtt WorkQueue.Arn
+              - Sid: PublishMetrics
+                Effect: Allow
+                Action: "cloudwatch:PutMetricData"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "cloudwatch:namespace": !Ref MetricsNamespace
+              - Sid: EndpointLogs
+                Effect: Allow
+                Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"]
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/sagemaker/*"
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: "ecr:GetAuthorizationToken"
+                Resource: "*"
+              - Sid: EcrPull
+                Effect: Allow
+                Action: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"]
+                Resource: !GetAtt Repository.Arn
+              - Sid: VpcAttachment
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:CreateNetworkInterfacePermission
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DeleteNetworkInterfacePermission
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeDhcpOptions
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                Resource: "*"
+
+Outputs:
+  ArtifactBucket:
+    Value: !Ref ArtifactBucket
+  KmsKeyArn:
+    Value: !GetAtt Key.Arn
+  StateTableName:
+    Value: !Ref StateTable
+  QueueUrl:
+    Value: !Ref WorkQueue
+  DlqName:
+    Value: !GetAtt DeadLetterQueue.QueueName
+  RepositoryName:
+    Value: !Ref Repository
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+  ExecutionRoleArn:
+    Value: !GetAtt ExecutionRole.Arn

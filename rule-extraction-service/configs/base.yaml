@@ -1,0 +1,24 @@
+# Structured, non-secret defaults baked into the container image (/opt/program/configs/base.yaml).
+# Scalars are overridden by RULE_EXTRACTOR_* environment variables (see README "Configuration reference").
+
+output:
+  excel_sheet_name: rule_catalogue
+  excel_footer:
+    # When enabled and `lines` is non-empty, the workbook writer adds the lines as a print footer and as a small gray
+    # on-screen note two rows below the data. The original writer added a mandatory notice at runtime; set the exact
+    # text your policy requires here. It is intentionally left empty so no notice text is stored in this repository.
+    enabled: true
+    lines: []
+
+web_research:
+  # WebFetch is restricted to these hosts (https only). WebSearch is not available on Amazon Bedrock.
+  allowed_hosts:
+    - www.ihacpa.gov.au
+    - ihacpa.gov.au
+  # Topics used when a request enables web research without listing its own (web_research_topics).
+  default_topics: []
+
+# Optional overrides of source document file names inside source_docs/ (plain file names only):
+# sources:
+#   acs: {filename: "Australian_Coding_Standards_Fourteenth_Edition.pdf", edition: "14th Edition"}
+sources: {}

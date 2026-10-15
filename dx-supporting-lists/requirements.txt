@@ -1,0 +1,8 @@
+# Runtime dependencies. Ranges here; the container build prefers a fully pinned, hash-locked requirements.lock when one exists:
+#     make lock        (pip-compile --generate-hashes) -- commit the result, rebuild the image from it.
+boto3>=1.36,<2
+pandas>=2.0,<4
+openpyxl>=3.1,<4
+defusedxml>=0.7,<1
+flask>=3.0,<4
+gunicorn>=22.0,<24

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dx-supporting-lists"
+version = "2.0.0"
+description = "LLM-assisted supporting lists for ICD-10-AM diagnosis categories, served from an Amazon SageMaker real-time endpoint using Claude on Amazon Bedrock."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "boto3>=1.36",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "defusedxml>=0.7",
+    "flask>=3.0",
+    "gunicorn>=22.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+    "pip-tools>=7.4",
+]
+
+[project.scripts]
+dx-support = "dx_support.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dx_support = ["data/*.json"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "S"]
+ignore = ["E501", "S101", "S311"]   # long lines are tolerated; asserts appear in tests; random is used for jitter only
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]

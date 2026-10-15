@@ -1,0 +1,46 @@
+{
+  "request_id": "5b0d4c0e9d8f4c0a9a3e1f2b7c6d5e4f",
+  "model_version": "3f9a1c2d4e5b6a7c",
+  "confidence_threshold": 0.85,
+  "summary": {"n_records": 2, "n_scored": 2, "n_anomalies": 1, "n_skipped": 0, "n_rejected": 0},
+  "results": [
+    {
+      "admission_no": "A100234",
+      "status": "ok",
+      "reason": null,
+      "assigned_drg": "F62A",
+      "predicted_mdc": "F",
+      "predicted_base_drg": "62",
+      "predicted_complexity_split": "C",
+      "mdc_confidence": 0.9931,
+      "base_confidence": 0.9702,
+      "split_confidence": 0.9114,
+      "prob_assigned_split": 0.0212,
+      "mdc_discrepancy_flag": false,
+      "base_discrepancy_flag": false,
+      "split_inflation_flag": true,
+      "is_billing_anomaly": true,
+      "audit_priority_score": 6695.4914,
+      "warnings": []
+    },
+    {
+      "admission_no": "A100235",
+      "status": "ok",
+      "reason": null,
+      "assigned_drg": "E62C",
+      "predicted_mdc": "E",
+      "predicted_base_drg": "62",
+      "predicted_complexity_split": "C",
+      "mdc_confidence": 0.9876,
+      "base_confidence": 0.9533,
+      "split_confidence": 0.9402,
+      "prob_assigned_split": 0.9402,
+      "mdc_discrepancy_flag": false,
+      "base_discrepancy_flag": false,
+      "split_inflation_flag": false,
+      "is_billing_anomaly": false,
+      "audit_priority_score": 0.0,
+      "warnings": []
+    }
+  ]
+}

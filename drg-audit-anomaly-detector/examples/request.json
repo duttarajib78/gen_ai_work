@@ -1,0 +1,29 @@
+{
+  "records": [
+    {
+      "admission_no": "A100234",
+      "diagnosis_code_array": ["I50.0", "I10", "E11.9", "N18.3"],
+      "procedure_code_array": ["38497-00"],
+      "medical_claims_array": ["55114", "38200"],
+      "drg_vers": "10.0",
+      "drg": "F62A",
+      "los": 9,
+      "minutes_operating_theatre": 0,
+      "hours_of_mechanical_ventilation": 0,
+      "member_age": 71,
+      "drg_benefit": 6840.5
+    },
+    {
+      "admission_no": "A100235",
+      "diagnosis_code_array": ["J18.9", "I10"],
+      "procedure_code_array": [],
+      "medical_claims_array": ["23"],
+      "drg_vers": "10.0",
+      "drg": "E62C",
+      "los": 3,
+      "member_age": 54,
+      "drg_benefit": 1210.0
+    }
+  ],
+  "options": {"confidence_threshold": 0.85}
+}
