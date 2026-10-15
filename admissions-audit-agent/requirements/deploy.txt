@@ -1,0 +1,7 @@
+# Only what tools/deploy, tools/client, and tools/evaluation need on the machine that runs them.
+boto3>=1.43,<2
+PyYAML>=6.0
+pandas>=2.2
+pyarrow>=15.0
+defusedxml>=0.7.1,<0.8
+Flask>=3.0,<4

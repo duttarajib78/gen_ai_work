@@ -1,0 +1,24 @@
+# Keep the build context minimal and free of anything that could carry secrets.
+.git
+.gitignore
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.crt
+.aws/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+tests/
+tools/
+artifacts/
+output/
+docs/
+*.tar.gz
+*.zip
+README.md
+Makefile

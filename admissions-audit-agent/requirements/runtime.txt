@@ -1,0 +1,13 @@
+# Runtime dependencies baked into the inference image.
+# Ranges are bounded to the next major version. For fully reproducible builds, generate a
+# hash-pinned lock in CI and install from it:
+#   pip-compile --generate-hashes --output-file requirements/runtime.lock requirements/runtime.txt
+boto3>=1.43,<2
+defusedxml>=0.7.1,<0.8
+Flask>=3.0,<4
+gunicorn>=23.0,<25
+numpy>=1.26,<3
+# pandas 2.x is what the internal grouper was validated against
+pandas>=2.2,<3
+# parquet reader used by the grouper's DRG reference data
+pyarrow>=15.0

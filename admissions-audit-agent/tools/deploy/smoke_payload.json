@@ -1,0 +1,10 @@
+{
+  "request_id": "deploy-smoke-test",
+  "episode": {
+    "admission_no": 1,
+    "diagnosis_code_array": ["J189", "I509"],
+    "procedure_code_array": ["3237500"],
+    "medical_claims_array": ["3"]
+  },
+  "options": {"mode": "verdicts_only"}
+}

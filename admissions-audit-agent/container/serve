@@ -1,0 +1,4 @@
+#!/bin/sh
+# Container entry point. SageMaker starts the image as `serve`; the argument is not used.
+set -eu
+exec gunicorn --config /opt/program/gunicorn.conf.py "audit_agent.serving.app:create_app()"

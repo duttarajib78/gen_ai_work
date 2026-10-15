@@ -1,0 +1,60 @@
+# Deployment configuration for tools/deploy/deploy_endpoint.py.
+# Copy to prod.yaml (or dev.yaml), replace every <placeholder>, then:
+#   python -m tools.deploy.deploy_endpoint --config tools/deploy/config/prod.yaml --dry-run
+# No secrets belong in this file or in `environment`: credentials come from the execution role.
+
+endpoint_name: admissions-audit-agent-prod
+region: ap-southeast-2
+
+image_uri: <account-id>.dkr.ecr.ap-southeast-2.amazonaws.com/admissions-audit-agent:<immutable-tag>
+model_data_url: s3://<bucket>/admissions-audit-agent/<version>/model.tar.gz
+execution_role_arn: arn:aws:iam::<account-id>:role/<endpoint-execution-role>
+kms_key_id: arn:aws:kms:ap-southeast-2:<account-id>:key/<key-id>      # encrypts the endpoint's storage volume
+
+vpc:                                   # required; two or more subnets in different Availability Zones
+  subnets: [<subnet-a>, <subnet-b>]
+  security_group_ids: [<security-group>]
+
+instance:
+  type: ml.m5.large                    # CPU only: the model runs in Amazon Bedrock
+  count: 2                             # two instances keeps the endpoint available through a zone failure
+routing_strategy: LEAST_OUTSTANDING_REQUESTS   # requests vary from seconds to minutes
+startup_health_check_timeout_s: 600
+model_data_download_timeout_s: 600
+
+autoscaling:
+  min_capacity: 2
+  max_capacity: 6
+  target_invocations_per_instance: 20  # per minute; lower it if requests are slow (high effort, streaming)
+  scale_in_cooldown_s: 600
+  scale_out_cooldown_s: 120
+
+blue_green:                            # used when updating an existing endpoint
+  canary_percent: 10
+  canary_wait_s: 300
+  termination_wait_s: 600              # lets in-flight streaming requests finish on the old fleet
+  max_execution_s: 1800
+
+monitoring:
+  sns_topic_arn: arn:aws:sns:ap-southeast-2:<account-id>:<alerts-topic>
+  alarm_5xx_threshold: 5               # 5XX responses per minute that trigger the alarm and automatic rollback
+  p99_model_latency_ms: 55000
+  deadline_exceeded_threshold: 5
+  llm_throttled_threshold: 20
+
+# Container environment (non-secret). Validated with the same code the service runs at start-up,
+# so a configuration that would crash on the endpoint is rejected here.
+environment:
+  AUDIT_BEDROCK_MODEL_ID: global.anthropic.claude-sonnet-5-5
+  # DECISION REQUIRED (README, "Decisions required before go-live"). With a global. profile the service
+  # refuses to start unless this is "true"; set it only after data-governance approval.
+  AUDIT_ALLOW_GLOBAL_INFERENCE: "false"
+  AUDIT_LLM_EFFORT: high
+  AUDIT_LOW_CONFIDENCE_WEAK_THRESHOLD: "0.5"
+  AUDIT_GROUPER_BACKEND: au_drg
+  AUDIT_GROUPER_STACK_NAME: hambs-shed
+
+tags:
+  Application: admissions-audit-agent
+  Environment: prod
+  DataClassification: health-information

@@ -1,0 +1,3 @@
+# Internal AR-DRG grouper client used by vendor/au_grouper.py.
+# Resolved from your internal package index; see container/Dockerfile (BuildKit secret "pip_conf").
+groupy>=1.0.0

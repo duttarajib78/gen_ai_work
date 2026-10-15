@@ -1,0 +1,30 @@
+# AWS CodeBuild spec for building the image where Docker is not available (for example from a
+# SageMaker Studio domain without Docker access). Create a CodeBuild project with privileged mode
+# enabled and these environment variables:
+#   AWS_ACCOUNT_ID, AWS_REGION, ECR_REPOSITORY, IMAGE_TAG  (use an immutable tag, never "latest")
+#   PIP_CONF_SECRET_ARN  optional: Secrets Manager secret holding a pip.conf for a private index
+# Provide vendor/au_grouper.py in the source bundle (it is not stored in version control).
+version: 0.2
+phases:
+  pre_build:
+    commands:
+      - REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+      - aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+      - |
+        SECRET_ARGS=""
+        if [ -n "${PIP_CONF_SECRET_ARN:-}" ]; then
+          aws secretsmanager get-secret-value --region "${AWS_REGION}" --secret-id "${PIP_CONF_SECRET_ARN}" \
+            --query SecretString --output text > /tmp/pip.conf
+          chmod 600 /tmp/pip.conf
+          SECRET_ARGS="--secret id=pip_conf,src=/tmp/pip.conf"
+        fi
+        echo "SECRET_ARGS=${SECRET_ARGS}" > /tmp/build.env
+  build:
+    commands:
+      - . /tmp/build.env
+      - DOCKER_BUILDKIT=1 docker build ${SECRET_ARGS} -f container/Dockerfile -t "${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}" .
+  post_build:
+    commands:
+      - rm -f /tmp/pip.conf
+      - docker push "${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+      - echo "pushed ${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"

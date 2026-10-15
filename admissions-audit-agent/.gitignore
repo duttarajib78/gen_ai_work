@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+build/
+dist/
+
+# local artifacts and outputs (never commit reference data, model artifacts, or results)
+artifacts/
+output/
+*.tar.gz
+.env
+.env.*
+*.pem
+*.key
+vendor/au_grouper.py
